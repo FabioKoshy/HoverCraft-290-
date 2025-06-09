@@ -28,15 +28,17 @@
 
 ## 🎥 Demonstration GIFs
 
-### 1️⃣ Hovercraft Lifting All Components
-![Hover Lift](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/Hovering%20.gif)
+|  1️⃣ Hovercraft Lifting All Components |
+|---------------------------------------|
+| ![Hover Lift](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/Hovering%20.gif) |
 
-| ### 2️⃣ Trial Run |### 3️⃣ Resilient Impact |
+|  2️⃣ Trial Run | 3️⃣ Resilient Impact |
 |------------------|------------------------|
 | ![Maze Navigation](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/Hovercraft%20demo.gif) | ![Hovers over objects](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/Resilient%20impact.gif) |
 
-### 4️⃣ Base Build
-![Base Build](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/Base%20Build.jpg)
+|  4️⃣ Base Build                         |
+|-------------------------------------------|
+| ![Base Build](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/Base%20Build.jpg) |
 
 ---
 
