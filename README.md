@@ -3,6 +3,7 @@
 ## 📌 About the Project
 **HoverCraft 290** is a fully autonomous hovercraft designed to navigate through a track with obstacles and turns. It uses sensor fusion and real-time control logic written in **Pure C for AVR microcontrollers** to stabilize, detect, and maneuver dynamically.
 
+![Image](https://github.com/user-attachments/assets/14433d42-9568-49f8-953d-2b6cb394bbae)
 ---
 
 ## ✨ Features & Components
