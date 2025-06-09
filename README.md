@@ -38,7 +38,7 @@
 ## 📄 Full Technical Report
 
 For detailed documentation of design decisions, component integration, results, and evaluation:
-👉 ![Download ENGR 290 Final Report (PDF)](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/ENGR%20290%20FALL%202024%20Project%20Team2.pdf)
+👉 [Download ENGR 290 Final Report (PDF)](https://github.com/FabioKoshy/HoverCraft-290-/blob/main/ENGR%20290%20FALL%202024%20Project%20Team2.pdf)
 
 ---
 
