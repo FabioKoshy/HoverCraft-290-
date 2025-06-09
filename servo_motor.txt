@@ -1,0 +1,282 @@
+#include <Wire.h>
+#include <Servo.h>
+
+// MPU6050 I2C address
+#define MPU6050_ADDR 0x68
+
+// Pin definitions
+const int SERVO_PIN = 5;    // Pin 5 for Servo
+const int LED_L_PIN = 13;   // Onboard LED L
+const int LED_D3_PIN = 3;   // Pin 3 for LED D3 (PWM)
+
+// Constants
+const float accel_sensitivity = 16384.0; // For ±2g
+const float gyro_sensitivity = 131.0;    // For ±250°/s
+
+// Variables for MPU6050 data
+int16_t AcX_raw, AcY_raw, AcZ_raw;
+int16_t GyX_raw, GyY_raw, GyZ_raw;
+
+// Variables for calculations
+float roll = 0.0, pitch = 0.0, yaw = 0.0;
+unsigned long prevTime = 0;
+unsigned long lastOutputTime = 0;
+
+// Calibration offsets
+float accel_x_offset = 0.0;
+float gyro_z_offset = 0.0;
+
+// For Servo control
+Servo myServo;
+
+// For distance measurement
+float velocity = 0.0;
+float distance = 0.0;
+
+// For high-pass filter
+float last_linear_accel_x_ms2 = 0.0;
+const float alpha_hp = 0.9;
+float accel_x_hp = 0.0;
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+  // Initialize MPU6050
+  MPU6050_init();
+  delay(100);
+
+  // Calibrate sensors
+  Serial.println("Calibrating sensors...");
+  calibrate_sensors();
+  Serial.println("Calibration complete.");
+
+  // Initialize Servo
+  myServo.attach(SERVO_PIN);
+
+  // Set up pins
+  pinMode(LED_L_PIN, OUTPUT);
+  pinMode(LED_D3_PIN, OUTPUT);
+
+  prevTime = millis();
+  lastOutputTime = millis();
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  float deltaTime = (currentTime - prevTime) / 1000.0;
+  if (deltaTime <= 0 || deltaTime > 0.1) {
+    deltaTime = 0.008; // Default to 8ms if deltaTime is invalid
+  }
+  prevTime = currentTime;
+
+  // Read MPU6050 data
+  MPU6050_read_all();
+
+  // Compute angles
+  compute_angles(deltaTime);
+
+  // Adjust accelerometer readings
+  float accel_x = ((float)AcX_raw / accel_sensitivity) - accel_x_offset;
+
+  // Compute gravity component
+  float pitch_rad = pitch * PI / 180.0;
+  float roll_rad = roll * PI / 180.0;
+  float gravity_x = sin(pitch_rad);
+
+  // Compute linear acceleration by removing gravity component
+  float linear_accel_x = accel_x - gravity_x;
+
+  // Convert to m/s²
+  float linear_accel_x_ms2 = linear_accel_x * 9.80665;
+
+  // Implement high-pass filter to remove drift
+  accel_x_hp = alpha_hp * (accel_x_hp + linear_accel_x_ms2 - last_linear_accel_x_ms2);
+  last_linear_accel_x_ms2 = linear_accel_x_ms2;
+
+  // Update velocity and distance only when there is significant acceleration along X-axis
+  if (abs(linear_accel_x_ms2) > 0.2) {
+    velocity += accel_x_hp * deltaTime;
+    distance += velocity * deltaTime;
+  } else {
+    velocity = 0.0; // Zero Velocity Update (ZUPT)
+  }
+
+  // Limit distance to prevent overflow
+  if (distance > 1000.0) {
+    distance = 1000.0;
+  } else if (distance < -1000.0) {
+    distance = -1000.0;
+  }
+
+  // Control Servo based on yaw
+  control_servo(yaw);
+
+  // Control LED L based on yaw angle
+  if (abs(yaw) > 85.0) {
+    digitalWrite(LED_L_PIN, HIGH);
+  } else {
+    digitalWrite(LED_L_PIN, LOW);
+  }
+
+  // Control brightness of LED D3 based on linear acceleration along X-axis
+  float accel_x_for_brightness = linear_accel_x;  // in g units
+
+  uint8_t brightness;
+  if (accel_x_for_brightness > -0.08 && accel_x_for_brightness < 0.08) {
+    brightness = 0;  // LED OFF
+  } else if (accel_x_for_brightness <= -1.08 || accel_x_for_brightness >= 1.08) {
+    brightness = 255;  // LED 100% ON
+  } else if (accel_x_for_brightness < -0.08) {
+    // Map from -0.08g to -1.08g
+    brightness = (uint8_t)(((accel_x_for_brightness + 0.08) / (-1.08 + 0.08)) * 255.0);
+  } else if (accel_x_for_brightness > 0.08) {
+    // Map from 0.08g to 1.08g
+    brightness = (uint8_t)(((accel_x_for_brightness - 0.08) / (1.08 - 0.08)) * 255.0);
+  } else {
+    brightness = 0;
+  }
+
+  // Ensure brightness is within 0-255
+  brightness = constrain(brightness, 0, 255);
+
+  analogWrite(LED_D3_PIN, brightness);
+
+  // Output data once per second
+  if (currentTime - lastOutputTime >= 1000) {
+    Serial.print("Roll: ");
+    Serial.print(roll, 2);
+    Serial.print("°, ");
+    Serial.print("Pitch: ");
+    Serial.print(pitch, 2);
+    Serial.print("°, ");
+    Serial.print("Yaw: ");
+    Serial.print(yaw, 2);
+    Serial.println("°");
+
+    Serial.print("Accel X (raw): ");
+    Serial.print(accel_x, 2);
+    Serial.print("g, ");
+    Serial.print("Accel X (linear): ");
+    Serial.print(linear_accel_x, 2);
+    Serial.println("g");
+
+    Serial.print("Accel Y: ");
+    Serial.print((float)AcY_raw / accel_sensitivity, 2);
+    Serial.print("g, ");
+    Serial.print("Accel Z: ");
+    Serial.print((float)AcZ_raw / accel_sensitivity, 2);
+    Serial.println("g");
+
+    Serial.print("Distance traveled: ");
+    Serial.print(distance * 100.0, 2); // Convert to cm
+    Serial.println(" cm");
+
+    lastOutputTime = currentTime;
+  }
+
+  delay(5);
+}
+
+void MPU6050_init() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x6B); // PWR_MGMT_1 register
+  Wire.write(0);    // Set to zero (wakes up the MPU-6050)
+  Wire.endTransmission(true);
+
+  // Set accelerometer full-scale range to ±2g
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x1C); // ACCEL_CONFIG register
+  Wire.write(0x00); // Set range to ±2g
+  Wire.endTransmission(true);
+
+  // Set gyroscope full-scale range to ±250°/s
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x1B); // GYRO_CONFIG register
+  Wire.write(0x00); // Set range to ±250°/s
+  Wire.endTransmission(true);
+}
+
+void calibrate_sensors() {
+  const int num_samples = 1000;
+  float accel_x_sum = 0.0;
+  float gyro_z_sum = 0.0;
+  Serial.println("Please keep the device still during calibration...");
+  for (int i = 0; i < num_samples; i++) {
+    MPU6050_read_all();
+    accel_x_sum += (float)AcX_raw / accel_sensitivity;
+    gyro_z_sum += (float)GyZ_raw / gyro_sensitivity;
+    delay(2);
+  }
+  accel_x_offset = accel_x_sum / num_samples;
+  gyro_z_offset = gyro_z_sum / num_samples;
+  Serial.print("Accel X Offset: ");
+  Serial.print(accel_x_offset, 4);
+  Serial.println(" g");
+  Serial.print("Gyro Z Offset: ");
+  Serial.print(gyro_z_offset, 4);
+  Serial.println(" °/s");
+}
+
+void MPU6050_read_all() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x3B); // Starting with register 0x3B (ACCEL_XOUT_H)
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU6050_ADDR, 14, true); // Request a total of 14 registers
+
+  AcX_raw = Wire.read() << 8 | Wire.read(); // ACCEL_XOUT_H and ACCEL_XOUT_L
+  AcY_raw = Wire.read() << 8 | Wire.read(); // ACCEL_YOUT_H and ACCEL_YOUT_L
+  AcZ_raw = Wire.read() << 8 | Wire.read(); // ACCEL_ZOUT_H and ACCEL_ZOUT_L
+  int16_t Tmp = Wire.read() << 8 | Wire.read(); // TEMP_OUT_H and TEMP_OUT_L
+  GyX_raw = Wire.read() << 8 | Wire.read(); // GYRO_XOUT_H and GYRO_XOUT_L
+  GyY_raw = Wire.read() << 8 | Wire.read(); // GYRO_YOUT_H and GYRO_YOUT_L
+  GyZ_raw = Wire.read() << 8 | Wire.read(); // GYRO_ZOUT_H and GYRO_ZOUT_L
+}
+
+void compute_angles(float deltaTime) {
+  float AcX = ((float)AcX_raw / accel_sensitivity);
+  float AcY = ((float)AcY_raw / accel_sensitivity);
+  float AcZ = ((float)AcZ_raw / accel_sensitivity);
+
+  float GyX = ((float)GyX_raw / gyro_sensitivity);
+  float GyY = ((float)GyY_raw / gyro_sensitivity);
+  float GyZ = ((float)GyZ_raw / gyro_sensitivity);
+
+  // Calculate accelerometer angles
+  float accel_roll = atan2(AcY, AcZ) * 180.0 / PI;
+  float accel_pitch = atan2(-AcX, sqrt(AcY * AcY + AcZ * AcZ)) * 180.0 / PI;
+
+  // Complementary filter constants
+  const float alpha = 0.98;
+
+  // Integrate gyroscope data
+  roll += GyX * deltaTime;
+  pitch += GyY * deltaTime;
+  yaw += (GyZ - gyro_z_offset) * deltaTime; // Apply gyro Z offset
+
+  // Correct drift with accelerometer data
+  roll = alpha * roll + (1.0 - alpha) * accel_roll;
+  pitch = alpha * pitch + (1.0 - alpha) * accel_pitch;
+
+  // Handle angle wrapping for yaw
+  if (yaw > 360.0) {
+    yaw -= 360.0;
+  } else if (yaw < -360.0) {
+    yaw += 360.0;
+  }
+}
+
+void control_servo(float yaw) {
+  // Constrain yaw to ±85 degrees
+  if (yaw > 85.0) yaw = 85.0;
+  if (yaw < -85.0) yaw = -85.0;
+
+  // Map yaw (-85 to 85) to servo angle (0 to 180)
+  int servoAngle = map(yaw, -85, 85, 0, 180);
+  servoAngle = constrain(servoAngle, 0, 180);
+
+  myServo.write(servoAngle);
+}
+
+
+

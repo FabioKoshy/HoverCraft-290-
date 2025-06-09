@@ -1,0 +1,153 @@
+//servo(L + R)+ US+ Both fans(whole code is Arduino)
+//
+#include <Servo.h>
+#include <avr/io.h>
+
+// Define ultrasonic sensor pins
+#define trigPin 13 // Trigger pin
+#define echoPin 3  // Echo pin
+
+// Define servo pin
+int servoPin = 5;
+Servo servo; // Create Servo object
+
+// Define fan control pins
+#define LIFTING_PIN PD4         // Lifting fan control pin (ON/OFF logic)
+#define PROPULSION_PIN PD6      // Propulsion fan control pin (PWM, OC0A)
+
+// Variables for ultrasonic sensor
+float duration, distanceL, distanceR, distance;
+float speed = 343; // Speed of sound in m/s
+
+// Function prototypes for fan control
+void init_lifting_fan();
+void control_lifting_fan(uint8_t state);
+void init_propulsion_pwm();
+void set_propulsion_speed(uint8_t duty_cycle);
+
+// Setup function
+void setup() {
+  Serial.begin(9600); // Start Serial communication for debugging
+
+  // Set up ultrasonic sensor pins
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  // Attach the servo to the pin
+  servo.attach(servoPin);
+
+  // Initialize fans
+  init_lifting_fan();
+  init_propulsion_pwm();
+
+  // Turn on fans at full speed initially
+  control_lifting_fan(1);    // Turn ON lifting fan
+  set_propulsion_speed(255); // Set propulsion fan to full speed (100% duty cycle)
+
+  // Set initial servo position
+  servo.write(90); // Start with servo in neutral position
+  Serial.println("Setup complete");
+}
+
+void loop() {
+  // Measure the distance to the nearest object
+  distance = measureDistance();
+
+  // Print the measured distance
+  Serial.print("Distance to nearest object: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+
+  if (distance > 20) {
+    // If the object is more than 20 cm
+    servo.write(90);
+    control_lifting_fan(1);    // Keep lifting fan ON
+    set_propulsion_speed(255); // Keep propulsion fan at full speed
+    Serial.println("Object is more than 20 cm away. Servo stays at 90° and fans stay ON.");
+    delay(500); // Wait before the next measurement
+    return; // Skip the rest of the loop
+  }
+
+  // If the object is less than 20 cm, stop the fans
+  control_lifting_fan(0);    // Turn OFF lifting fan
+  set_propulsion_speed(0);   // Turn OFF propulsion fan
+
+  // Move to 0° and measure distanceL
+  servo.write(0);
+  Serial.println("Moving servo to 0°...");
+  delay(3000); // Wait for 3 seconds
+  distanceL = measureDistance();
+  Serial.print("DistanceL (Left): ");
+  Serial.print(distanceL);
+  Serial.println(" cm");
+
+  // Move to 180° and measure distanceR
+  servo.write(180);
+  Serial.println("Moving servo to 180°...");
+  delay(3000); // Wait for 3 seconds
+  distanceR = measureDistance();
+  Serial.print("DistanceR (Right): ");
+  Serial.print(distanceR);
+  Serial.println(" cm");
+
+  // Compare distanceL and distanceR
+  if (distanceL < distanceR) {
+    // Move servo to 180° (right turn)
+    servo.write(180);
+    Serial.println("DistanceL < DistanceR: Turning right to 180°.");
+  } else if (distanceL > distanceR) {
+    // Move servo to 0° (left turn)
+    servo.write(0);
+    Serial.println("DistanceL > DistanceR: Turning left to 0°.");
+  }
+
+  // Turn on fans during the 5-second delay
+  control_lifting_fan(1);    // Turn ON lifting fan
+  set_propulsion_speed(255); // Set propulsion fan to full speed
+  Serial.println("Decision made. Fans ON during 5-second pause.");
+  delay(5000); // Pause for 5 seconds before restarting the loop
+}
+
+// Function to measure distance using the ultrasonic sensor
+float measureDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // Measure the duration of the echo pulse
+  duration = pulseIn(echoPin, HIGH);
+
+  // Calculate and return distance in cm
+  return ((speed * duration) / 10000) / 2;
+}
+
+// Initialize lifting fan pin as output
+void init_lifting_fan() {
+  DDRD |= (1 << LIFTING_PIN); // Set LIFTING_PIN as output
+}
+
+// Turn ON/OFF lifting fan
+void control_lifting_fan(uint8_t state) {
+  if (state) {
+    PORTD |= (1 << LIFTING_PIN); // Turn ON lifting fan
+  } else {
+    PORTD &= ~(1 << LIFTING_PIN); // Turn OFF lifting fan
+  }
+}
+
+// Initialize propulsion fan PWM
+void init_propulsion_pwm() {
+  DDRD |= (1 << PROPULSION_PIN); // Set PROPULSION_PIN as output
+
+  // Configure Timer/Counter0 for Fast PWM mode
+  TCCR0A |= (1 << WGM00) | (1 << WGM01); // Fast PWM mode
+  TCCR0A |= (1 << COM0A1);               // Non-inverted PWM on OC0A
+  TCCR0B |= (1 << CS01);                 // Prescaler = 8
+}
+
+// Set propulsion fan speed using PWM (0-255)
+void set_propulsion_speed(uint8_t duty_cycle) {
+  OCR0A = duty_cycle; // Set PWM duty cycle
+}

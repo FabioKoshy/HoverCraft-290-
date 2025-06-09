@@ -1,0 +1,538 @@
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdlib.h>  // For dtostrf function
+
+#define F_CPU 16000000UL  // 16 MHz CPU clock frequency
+
+// MPU6050 I2C address
+#define MPU6050_ADDR 0x68
+
+// Pin definitions for Arduino Nano
+#define SERVO_PIN PD5   // Pin 5 (PD5, OC0B)
+#define LED_L_PIN PB5   // Pin 13 (Onboard LED L)
+#define LED_D3_PIN PB3  // Pin 11 (OC2A)
+
+// MPU6050 register addresses
+#define GYRO_CONFIG 0x1B
+#define ACCEL_CONFIG 0x1C
+#define PWR_MGMT_1 0x6B
+
+// Constants
+#define MAX_DISTANCE 1000.0  // Maximum distance in meters
+#define ACCEL_THRESHOLD 0.02  // Adjust this threshold value if needed
+#define MAX_ANGLE 360.0      // Maximum angle in degrees for roll and pitch
+#define MAX_YAW 360.0        // Maximum yaw in degrees
+
+// Function prototypes
+void USART_Init(unsigned int ubrr);
+void USART_Transmit(unsigned char data);
+void USART_Print(const char *s);
+void TWI_init(void);
+void TWI_start(void);
+void TWI_stop(void);
+void TWI_write(uint8_t data);
+uint8_t TWI_read_ack(void);
+uint8_t TWI_read_nack(void);
+void MPU6050_init(void);
+void MPU6050_set_gyro_range(uint8_t range);
+void MPU6050_set_accel_range(uint8_t range);
+void MPU6050_set_sample_rate(uint8_t rate_div);
+void MPU6050_read_all(int16_t *AcX, int16_t *AcY, int16_t *AcZ,
+                      int16_t *GyX, int16_t *GyY, int16_t *GyZ);
+uint8_t MPU6050_read_register(uint8_t reg);
+void compute_angles(int16_t AcX_raw, int16_t AcY_raw, int16_t AcZ_raw,
+                    int16_t GyX_raw, int16_t GyY_raw, int16_t GyZ_raw,
+                    double *roll, double *pitch, double *yaw, double deltaTime);
+void init_LED_L(void);
+void control_LED_L(bool on);
+void init_LED_D3(void);
+void set_LED_D3_brightness(uint8_t brightness);
+void Timer0_PWM_init(void);
+void control_servo(double yaw);
+unsigned long millis(void);
+int map_value(int x, int in_min, int in_max, int out_min, int out_max);
+void calibrate_sensors(void);
+void I2C_scan(void);
+
+// Global variables
+volatile unsigned long timer1_overflow_count = 0;
+double distance = 0.0;  // Distance traveled along X-axis in meters
+
+// Sensitivity factors
+double gyro_sensitivity = 131.0;    // Default for ±250°/s
+double accel_sensitivity = 16384.0; // Default for ±2g
+
+// Variables for integration
+double velocity = 0.0;  // Velocity along X-axis in m/s
+
+// Calibration offsets
+double accel_x_offset = 0.0;
+double gyro_z_offset = 0.0;
+
+// Timer1 overflow interrupt to keep track of milliseconds
+ISR(TIMER1_OVF_vect) {
+    timer1_overflow_count++;
+}
+
+// UART functions
+void USART_Init(unsigned int ubrr) {
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0); // Enable receiver and transmitter
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); // Set frame format: 8 data bits, 1 stop bit
+}
+
+void USART_Transmit(unsigned char data) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = data;
+}
+
+void USART_Print(const char *s) {
+    while (*s) {
+        USART_Transmit(*s);
+        s++;
+    }
+}
+
+// I2C (TWI) functions
+void TWI_init(void) {
+    TWSR = 0x00; // Prescaler set to 1
+    TWBR = ((F_CPU / 100000UL) - 16) / 2; // Set SCL frequency to 100kHz
+    TWCR = (1 << TWEN); // Enable TWI
+}
+
+void TWI_start(void) {
+    TWCR = (1 << TWSTA) | (1 << TWEN) | (1 << TWINT);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+void TWI_stop(void) {
+    TWCR = (1 << TWSTO) | (1 << TWEN) | (1 << TWINT);
+}
+
+void TWI_write(uint8_t data) {
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+uint8_t TWI_read_ack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWEA); // Acknowledge after reception
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+uint8_t TWI_read_nack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN); // No acknowledge after reception
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+// MPU6050 functions
+void MPU6050_init(void) {
+    // Wake up the MPU6050
+    TWI_start();
+    TWI_write(MPU6050_ADDR << 1);
+    TWI_write(PWR_MGMT_1);
+    TWI_write(0x00); // Set to zero to wake up the sensor
+    TWI_stop();
+
+    // Set gyroscope full-scale range to ±250°/s
+    MPU6050_set_gyro_range(0x00);
+    // Set accelerometer full-scale range to ±2g
+    MPU6050_set_accel_range(0x00);
+    // Set sample rate divider to get 1kHz/(1+SMPLRT_DIV)
+    MPU6050_set_sample_rate(0x07); // Sample rate of 125Hz
+}
+
+void MPU6050_set_gyro_range(uint8_t range) {
+    TWI_start();
+    TWI_write(MPU6050_ADDR << 1);
+    TWI_write(GYRO_CONFIG);
+    TWI_write(range);
+    TWI_stop();
+
+    // Update gyro_sensitivity based on range
+    switch (range) {
+        case 0x00: gyro_sensitivity = 131.0; break;   // ±250°/s
+        case 0x08: gyro_sensitivity = 65.5; break;    // ±500°/s
+        case 0x10: gyro_sensitivity = 32.8; break;    // ±1000°/s
+        case 0x18: gyro_sensitivity = 16.4; break;    // ±2000°/s
+        default: gyro_sensitivity = 131.0; break;
+    }
+}
+
+void MPU6050_set_accel_range(uint8_t range) {
+    TWI_start();
+    TWI_write(MPU6050_ADDR << 1);
+    TWI_write(ACCEL_CONFIG);
+    TWI_write(range);
+    TWI_stop();
+
+    // Update accel_sensitivity based on range
+    switch (range) {
+        case 0x00: accel_sensitivity = 16384.0; break; // ±2g
+        case 0x08: accel_sensitivity = 8192.0; break;  // ±4g
+        case 0x10: accel_sensitivity = 4096.0; break;  // ±8g
+        case 0x18: accel_sensitivity = 2048.0; break;  // ±16g
+        default: accel_sensitivity = 16384.0; break;
+    }
+}
+
+void MPU6050_set_sample_rate(uint8_t rate_div) {
+    TWI_start();
+    TWI_write(MPU6050_ADDR << 1);
+    TWI_write(0x19); // Sample rate divider register
+    TWI_write(rate_div);
+    TWI_stop();
+}
+
+void MPU6050_read_all(int16_t *AcX, int16_t *AcY, int16_t *AcZ,
+                      int16_t *GyX, int16_t *GyY, int16_t *GyZ) {
+    TWI_start();
+    TWI_write(MPU6050_ADDR << 1);
+    TWI_write(0x3B); // Starting register for accelerometer data
+    TWI_start();
+    TWI_write((MPU6050_ADDR << 1) | 1);
+
+    *AcX = ((int16_t)TWI_read_ack() << 8) | TWI_read_ack();
+    *AcY = ((int16_t)TWI_read_ack() << 8) | TWI_read_ack();
+    *AcZ = ((int16_t)TWI_read_ack() << 8) | TWI_read_ack();
+    // Skip temperature data
+    TWI_read_ack(); TWI_read_ack();
+    *GyX = ((int16_t)TWI_read_ack() << 8) | TWI_read_ack();
+    *GyY = ((int16_t)TWI_read_ack() << 8) | TWI_read_ack();
+    *GyZ = ((int16_t)TWI_read_ack() << 8) | TWI_read_nack();
+    TWI_stop();
+}
+
+uint8_t MPU6050_read_register(uint8_t reg) {
+    uint8_t data;
+    TWI_start();
+    TWI_write(MPU6050_ADDR << 1);
+    TWI_write(reg);
+    TWI_start();
+    TWI_write((MPU6050_ADDR << 1) | 1);
+    data = TWI_read_nack();
+    TWI_stop();
+    return data;
+}
+
+// Compute roll, pitch, and yaw based on accelerometer and gyroscope data
+void compute_angles(int16_t AcX_raw, int16_t AcY_raw, int16_t AcZ_raw,
+                    int16_t GyX_raw, int16_t GyY_raw, int16_t GyZ_raw,
+                    double *roll, double *pitch, double *yaw, double deltaTime) {
+    double AcX = ((double)AcX_raw / accel_sensitivity);
+    double AcY = ((double)AcY_raw / accel_sensitivity);
+    double AcZ = ((double)AcZ_raw / accel_sensitivity);
+
+    double GyX = ((double)GyX_raw / gyro_sensitivity);
+    double GyY = ((double)GyY_raw / gyro_sensitivity);
+    double GyZ = ((double)GyZ_raw / gyro_sensitivity);
+
+    // Calculate accelerometer angles
+    double accel_roll = atan2(AcY, AcZ) * 180.0 / M_PI;
+    double accel_pitch = atan2(-AcX, sqrt(AcY * AcY + AcZ * AcZ)) * 180.0 / M_PI;
+
+    // Complementary filter constants
+    const double alpha = 0.999;  // Increased to rely more on gyroscope data
+
+    // Integrate gyroscope data
+    *roll += GyX * deltaTime;
+    *pitch += GyY * deltaTime;
+    *yaw += GyZ * deltaTime;
+
+    // Correct drift with accelerometer when within ±90 degrees
+    if (fabs(accel_roll) < 90.0) {
+        *roll = alpha * (*roll) + (1.0 - alpha) * accel_roll;
+    }
+
+    if (fabs(accel_pitch) < 90.0) {
+        *pitch = alpha * (*pitch) + (1.0 - alpha) * accel_pitch;
+    }
+
+    // Handle angle wrapping for roll
+    if (*roll > MAX_ANGLE) {
+        *roll -= 360.0;
+    } else if (*roll < -MAX_ANGLE) {
+        *roll += 360.0;
+    }
+
+    // Handle angle wrapping for pitch
+    if (*pitch > MAX_ANGLE) {
+        *pitch -= 360.0;
+    } else if (*pitch < -MAX_ANGLE) {
+        *pitch += 360.0;
+    }
+
+    // Limit yaw to -360 to 360 degrees
+    if (*yaw > MAX_YAW) {
+        *yaw -= 360.0;
+    } else if (*yaw < -MAX_YAW) {
+        *yaw += 360.0;
+    }
+}
+
+// Initialize LED L (onboard LED)
+void init_LED_L(void) {
+    DDRB |= (1 << LED_L_PIN);  // Set LED L pin as output
+}
+
+// Control LED L
+void control_LED_L(bool on) {
+    if (on) {
+        PORTB |= (1 << LED_L_PIN);  // Turn on LED L
+    } else {
+        PORTB &= ~(1 << LED_L_PIN); // Turn off LED L
+    }
+}
+
+// Initialize LED D3 (connected to OC2A)
+void init_LED_D3(void) {
+    DDRB |= (1 << LED_D3_PIN);  // Set LED D3 pin as output
+    TCCR2A |= (1 << COM2A1) | (1 << WGM21) | (1 << WGM20);  // Fast PWM mode, non-inverting
+    TCCR2B |= (1 << CS21);  // Prescaler 8
+}
+
+// Set brightness of LED D3
+void set_LED_D3_brightness(uint8_t brightness) {
+    OCR2A = brightness;  // Set PWM duty cycle for LED D3
+}
+
+// Initialize Timer0 for servo PWM control on PD5 (OC0B)
+void Timer0_PWM_init(void) {
+    DDRD |= (1 << SERVO_PIN); // Set Servo pin as output
+    TCCR0A |= (1 << COM0B1) | (1 << WGM01) | (1 << WGM00); // Fast PWM, non-inverting
+    TCCR0B |= (1 << CS01); // Prescaler 8
+}
+
+// Control servo motor based on yaw angle using Timer0 PWM
+void control_servo(double yaw) {
+    // Constrain yaw to ±85 degrees
+    if (yaw > 85.0) yaw = 85.0;
+    if (yaw < -85.0) yaw = -85.0;
+
+    // Map yaw (-85 to 85) to servo pulse width (1000 to 2000 us)
+    int pulseWidth = map_value((int)yaw, -85, 85, 1000, 2000);
+
+    // Convert pulse width to duty cycle
+    uint8_t dutyCycle = (uint8_t)((pulseWidth - 1000) * 255 / 1000);
+    OCR0B = dutyCycle;
+}
+
+// Map value from one range to another
+int map_value(int x, int in_min, int in_max, int out_min, int out_max) {
+    long result = (long)(x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+    if (result > out_max) result = out_max;
+    if (result < out_min) result = out_min;
+    return (int)result;
+}
+
+// Function to get the current time in milliseconds
+unsigned long millis(void) {
+    unsigned long millis;
+    uint8_t oldSREG = SREG;
+    cli();
+    millis = (timer1_overflow_count * 65536UL * 8UL) / (F_CPU / 1000UL);
+    SREG = oldSREG;
+    return millis;
+}
+
+// Function to calibrate sensors
+void calibrate_sensors(void) {
+    const int num_samples = 2000;
+    double accel_x_sum = 0.0;
+    double gyro_z_sum = 0.0;
+    for (int i = 0; i < num_samples; i++) {
+        int16_t AcX, AcY, AcZ, GyX, GyY, GyZ;
+        MPU6050_read_all(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ);
+        accel_x_sum += (double)AcX / accel_sensitivity;
+        gyro_z_sum += (double)GyZ / gyro_sensitivity;
+        _delay_ms(1);
+    }
+    accel_x_offset = accel_x_sum / num_samples;
+    gyro_z_offset = gyro_z_sum / num_samples;
+}
+
+// I2C scan function
+void I2C_scan(void) {
+    USART_Print("Scanning I2C bus...\r\n");
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        TWI_start();
+        TWI_write(addr << 1);
+        if ((TWSR & 0xF8) == 0x18) { // SLA+W has been transmitted and ACK received
+            char buffer[32];
+            snprintf(buffer, sizeof(buffer), "Found device at 0x%02X\r\n", addr);
+            USART_Print(buffer);
+        }
+        TWI_stop();
+    }
+    USART_Print("Scan complete.\r\n");
+}
+
+int main(void) {
+    // Initialization
+    USART_Init((F_CPU / 16 / 9600) - 1);  // Set baud rate to 9600
+    USART_Print("Starting program...\r\n");
+
+    TWI_init();
+    MPU6050_init();
+    USART_Print("MPU6050 initialized.\r\n");
+
+    // Check MPU6050 connection
+    uint8_t who_am_i = MPU6050_read_register(0x75);
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "WHO_AM_I: 0x%02X\r\n", who_am_i);
+    USART_Print(buffer);
+
+    if (who_am_i != 0x68) {
+        USART_Print("MPU6050 not found!\r\n");
+        while (1); // Stop execution
+    } else {
+        USART_Print("MPU6050 connected successfully.\r\n");
+    }
+
+    Timer0_PWM_init(); // Initialize PWM for servo motor
+    init_LED_L();
+    init_LED_D3();
+
+    // Timer1 configuration for millis()
+    TCCR1A = 0x00;
+    TCCR1B = (1 << CS11); // Prescaler 8
+    TIMSK1 = (1 << TOIE1); // Enable Timer1 overflow interrupt
+    sei(); // Enable global interrupts
+
+    // Calibrate sensors
+    USART_Print("Calibrating sensors...\r\n");
+    calibrate_sensors();
+    USART_Print("Calibration complete.\r\n");
+
+    int16_t AcX_raw, AcY_raw, AcZ_raw;
+    int16_t GyX_raw, GyY_raw, GyZ_raw;
+    double roll = 0.0, pitch = 0.0, yaw = 0.0;
+    unsigned long prevTime_ms = millis(), currentTime_ms = millis(), lastOutputTime_ms = millis();
+
+    // Variables for high-pass filter and integration
+    double last_linear_accel_x_ms2 = 0.0;
+    const double alpha_hp = 0.9;
+    double accel_x_hp = 0.0;
+
+    while (1) {
+        currentTime_ms = millis();  // Get current time in milliseconds
+        double deltaTime = (currentTime_ms - prevTime_ms) / 1000.0;  // Calculate delta time in seconds
+
+        // Ensure deltaTime is within expected bounds
+        if (deltaTime <= 0 || deltaTime > 0.1) {
+            deltaTime = 0.008; // Default to 8ms if deltaTime is invalid
+        }
+
+        prevTime_ms = currentTime_ms;
+
+        // Read accelerometer and gyroscope data
+        MPU6050_read_all(&AcX_raw, &AcY_raw, &AcZ_raw, &GyX_raw, &GyY_raw, &GyZ_raw);
+
+        // Compute roll, pitch, and yaw
+        compute_angles(AcX_raw, AcY_raw, AcZ_raw, GyX_raw, GyY_raw, GyZ_raw,
+                       &roll, &pitch, &yaw, deltaTime);
+
+        // Adjust accelerometer readings
+        double accel_x = ((double)AcX_raw / accel_sensitivity) - accel_x_offset;
+
+        // Compute gravity component
+        double pitch_rad = pitch * M_PI / 180.0;
+        double gravity_x = sin(pitch_rad);
+
+        // Compute linear acceleration by removing gravity component
+        double linear_accel_x = accel_x - gravity_x;
+
+        // Convert to m/s²
+        double linear_accel_x_ms2 = linear_accel_x * 9.80665;
+
+        // Implement high-pass filter to remove drift
+        accel_x_hp = alpha_hp * (accel_x_hp + linear_accel_x_ms2 - last_linear_accel_x_ms2);
+        last_linear_accel_x_ms2 = linear_accel_x_ms2;
+
+        // Update velocity and distance only when linear acceleration is above the threshold
+        if (fabs(accel_x_hp) > ACCEL_THRESHOLD) {
+    velocity += accel_x_hp * deltaTime;
+    distance += velocity * deltaTime;
+} else {
+    velocity = 0.0; // Set velocity to zero when acceleration is below the threshold
+}
+
+        // Limit distance to prevent overflow
+        if (distance > MAX_DISTANCE) {
+            distance = MAX_DISTANCE;
+        } else if (distance < -MAX_DISTANCE) {
+            distance = -MAX_DISTANCE;
+        }
+
+        // Control servo based on yaw
+        control_servo(yaw);
+
+        // Control LED L based on yaw angle
+        control_LED_L(fabs(yaw) > 85.0);
+
+        // Control brightness of LED D3 based on X-axis acceleration (Roll)
+        double abs_accel_x = fabs(linear_accel_x);
+        if (abs_accel_x < 0.08) {
+            set_LED_D3_brightness(0);
+        } else if (abs_accel_x > 1.08) {
+            set_LED_D3_brightness(255);
+        } else {
+            int brightness = (int)(((abs_accel_x - 0.08) * 255.0) / (1.08 - 0.08));
+            set_LED_D3_brightness(brightness);
+        }
+
+        // Output data once per second
+        if (currentTime_ms - lastOutputTime_ms >= 1000) {  // Every 1 second
+            // Print roll, pitch, yaw
+            dtostrf(roll, 6, 2, buffer);
+            USART_Print("Roll: ");
+            USART_Print(buffer);
+            USART_Print("°, ");
+
+            dtostrf(pitch, 6, 2, buffer);
+            USART_Print("Pitch: ");
+            USART_Print(buffer);
+            USART_Print("°, ");
+
+            dtostrf(yaw, 6, 2, buffer);
+            USART_Print("Yaw: ");
+            USART_Print(buffer);
+            USART_Print("°\r\n");
+
+            // Print accelerations
+            dtostrf(accel_x, 6, 2, buffer);
+            USART_Print("Accel X: ");
+            USART_Print(buffer);
+            USART_Print("g, ");
+
+            dtostrf(((double)AcY_raw / accel_sensitivity), 6, 2, buffer);
+            USART_Print("Y: ");
+            USART_Print(buffer);
+            USART_Print("g, ");
+
+            dtostrf(((double)AcZ_raw / accel_sensitivity), 6, 2, buffer);
+            USART_Print("Z: ");
+            USART_Print(buffer);
+            USART_Print("g\r\n");
+
+            // Print distance
+            dtostrf(distance * 100.0, 6, 2, buffer); // Convert to cm
+            USART_Print("Distance traveled: ");
+            USART_Print(buffer);
+            USART_Print(" cm\r\n");
+
+            lastOutputTime_ms = currentTime_ms;
+        }
+
+        // Small delay to prevent overwhelming the sensor
+        _delay_ms(5);
+    }
+
+    return 0;
+}

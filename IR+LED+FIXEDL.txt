@@ -1,0 +1,181 @@
+#include <avr/io.h> 
+#include <util/delay.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdbool.h> // Include for boolean type
+
+#define F_CPU 16000000UL // Define the CPU frequency as 16 MHz
+#define SENSOR_MODEL 1080 // GP2Y0A21Y
+#define NB_SAMPLE 10
+#define BRIGHTNESS_PIN PB3 // Pin connected to LED D3 (Arduino Nano pin 3)
+#define LED_L_PIN PB5 // Pin connected to LED L (e.g., Arduino Nano pin 5)
+
+#define D1 15 // Distance d1 in cm
+#define D2 42 // Distance d2 in cm
+
+// Define the sensor pins (ADC channels)
+#define NUM_SENSORS 2
+int ir_pins[NUM_SENSORS] = {0, 1}; // ADC0 and ADC1
+
+// Function prototypes
+void USART_Init(unsigned int ubrr);
+void USART_Transmit(unsigned char data);
+void USART_Print(const char *s);
+void sort(int a[], int size);
+int distance(int irPin, long sensorModel, int *median_adc);
+void init_brightness();
+void set_brightness(int brightness);
+void init_LED_L();
+void control_LED_L(bool flash);
+
+void USART_Init(unsigned int ubrr) {
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+void USART_Transmit(unsigned char data) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = data;
+}
+
+void USART_Print(const char *s) {
+    while (*s) {
+        USART_Transmit(*s);
+        s++;
+    }
+}
+
+void sort(int a[], int size) {
+    for (int i = 0; i < (size - 1); i++) {
+        bool flag = true;
+        for (int o = 0; o < (size - (i + 1)); o++) {
+            if (a[o] > a[o + 1]) {
+                int t = a[o];
+                a[o] = a[o + 1];
+                a[o + 1] = t;
+                flag = false;
+            }
+        }
+        if (flag) break;
+    }
+}
+
+void init_brightness() {
+    // Set OC2A/PB3 as output for PWM
+    DDRB |= (1 << BRIGHTNESS_PIN);
+    
+    // Configure Timer/Counter2 for Fast PWM mode, non-inverted output
+    TCCR2A |= (1 << COM2A1) | (1 << WGM21) | (1 << WGM20);
+    TCCR2B |= (1 << CS21); // Prescaler = 8
+}
+
+void set_brightness(int brightness) {
+    OCR2A = brightness; // Set PWM duty cycle
+}
+
+void init_LED_L() {
+    DDRB |= (1 << LED_L_PIN); // Set LED L pin as output
+}
+
+void control_LED_L(bool flash) {
+    if (flash) {
+        // Flashing the LED L with 1s period (0.5s on, 0.5s off)
+        PORTB ^= (1 << LED_L_PIN); // Toggle the LED state
+        _delay_ms(500);            // Delay for half the period
+    } else {
+        PORTB &= ~(1 << LED_L_PIN); // Turn off LED L
+    }
+}
+
+int distance(int irPin, long sensorModel, int *median_adc) {
+    int ir_val[NB_SAMPLE] = {};
+    int distanceCM;
+    int median;
+
+    for (int i = 0; i < NB_SAMPLE; i++) {
+        // Start ADC conversion
+        ADMUX = (1 << REFS0) | (irPin & 0x07); // Set reference voltage to AVcc, select ADC channel
+        ADCSRA |= (1 << ADEN) | (1 << ADSC); // Enable ADC, start conversion
+        while (ADCSRA & (1 << ADSC)); // Wait for conversion to complete
+        ir_val[i] = ADC;
+    }
+
+    // Get the approx median
+    sort(ir_val, NB_SAMPLE);
+    median = ir_val[NB_SAMPLE / 2];
+
+    // Store the median ADC value
+    if (median_adc != NULL) {
+        *median_adc = median;
+    }
+
+    if (sensorModel == 1080) {
+        distanceCM = 29.988 * pow(median / 1023.0 * 5.0, -1.173);
+    }
+    
+    return distanceCM;
+}
+
+int main(void) {
+    // Initialize USART for serial communication
+    USART_Init(103); // For 16MHz clock, baud rate 9600
+    
+    // Initialize brightness control for LED D3
+    init_brightness();
+
+    // Initialize LED L control
+    init_LED_L();
+
+    // Initialize variables
+    char buffer[64];
+    int dist;
+    int median_adc = 0;
+
+    // Initialize ADC
+    ADMUX = (1 << REFS0); // AVcc with external capacitor at AREF pin
+    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1); // Enable ADC, prescaler of 64
+
+    // Main loop
+    while (1) {
+        // Loop over each sensor
+        for (int sensor_index = 0; sensor_index < NUM_SENSORS; sensor_index++) {
+            int ir_pin = ir_pins[sensor_index];
+
+            // Measure distance and get median ADC value
+            dist = distance(ir_pin, SENSOR_MODEL, &median_adc);
+
+            // Control brightness based on distance
+            int brightness;
+            if (dist <= D1) {
+                brightness = 255; // Full brightness
+            } else if (dist >= D2) {
+                brightness = 0; // LED off
+            } else {
+                // Linearly increase brightness from 0% to 100% between d1 and d2
+                brightness = 255 - ((dist - D1) * 255) / (D2 - D1);
+            }
+
+            // Set LED brightness
+            set_brightness(brightness);
+
+            // Control LED L based on distance
+            if (dist <= D1 || dist >= D2) {
+                control_LED_L(true);  // Flash LED L if outside the range [D1, D2]
+            } else {
+                control_LED_L(false); // Turn off LED L if within the range [D1, D2]
+            }
+
+            // Print ADC value, distance, and brightness together
+            int brightness_percent = 100 - (brightness * 100) / 255;
+            snprintf(buffer, sizeof(buffer), "Sensor %d - ADC Value: %d, Distance: %d cm, Brightness: %d%%\r\n", sensor_index + 1, median_adc, dist, brightness_percent);
+            USART_Print(buffer);
+
+            // Delay for stability
+            _delay_ms(500);
+        }
+    }
+
+    return 0;
+}

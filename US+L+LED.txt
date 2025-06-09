@@ -1,0 +1,181 @@
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+#include <stdbool.h> // Include for boolean type
+
+#define F_CPU 16000000UL // Define the CPU frequency as 16 MHz
+
+// Define the trigger and echo pins
+#define TRIG_PIN PB5  // P13, Pin 3 (PB5)
+#define ECHO_PIN PD3  // P13, Pin 2 (PD3)
+#define LED_L_PIN PB5
+#define LED_D3_PIN PB3
+
+// Function prototypes
+void USART_Init(unsigned int ubrr);
+void USART_Transmit(unsigned char data);
+void USART_Print(const char *s);
+void init_HCSR04();
+float measure_distance();
+void init_LED();
+void control_LED(bool on);
+void init_brightness();
+void set_brightness(int brightness);
+
+void USART_Init(unsigned int ubrr) {
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+void USART_Transmit(unsigned char data) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = data;
+}
+
+void USART_Print(const char *s) {
+    while (*s) {
+        USART_Transmit(*s);
+        s++;
+    }
+}
+
+void init_HCSR04() {
+    DDRB |= (1 << TRIG_PIN);  // Set trigger pin as output
+    DDRD &= ~(1 << ECHO_PIN); // Set echo pin as input
+}
+
+float measure_distance() {
+    // Send a 10us pulse to trigger pin
+    PORTB &= ~(1 << TRIG_PIN); // Ensure trigger pin is low
+    _delay_us(2);
+    PORTB |= (1 << TRIG_PIN);  // Set trigger pin high
+    _delay_us(10);             // Wait for 10 microseconds
+    PORTB &= ~(1 << TRIG_PIN); // Set trigger pin low
+
+    // Measure the duration of the pulse from echo pin
+    unsigned long duration = 0;
+    unsigned long max_duration = F_CPU / 10; // Maximum duration for timeout
+    while (!(PIND & (1 << ECHO_PIN))) {
+        if (duration++ >= max_duration) return -1; // Timeout
+        _delay_us(1);
+    }
+    
+    TCNT1 = 0;                         // Clear Timer1
+    TCCR1B |= (1 << CS11);             // Start Timer1 with prescaler 8
+    while (PIND & (1 << ECHO_PIN)) {
+        if (TCNT1 > max_duration) return -1; // Timeout
+    }
+    TCCR1B &= ~(1 << CS11);            // Stop Timer1
+
+    // Calculate the pulse length in milliseconds
+    float pulse_length_ms = (TCNT1 * 8.0) / (F_CPU / 1000.0); // Time in milliseconds
+
+    // Print pulse length for debugging
+    char pulse_length_buffer[16];
+    dtostrf(pulse_length_ms, 6, 2, pulse_length_buffer); // Convert float to string with 2 decimal places
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "Pulse Length = %s ms\r\n", pulse_length_buffer);
+    USART_Print(buffer);
+
+    // Calculate distance in centimeters
+    float time_taken = TCNT1 * (8.0 / F_CPU); // Time in seconds
+    float distance = (time_taken * 34300.0) / 2.0; // Distance in cm
+
+    return distance;
+}
+
+void init_LED() {
+    DDRB |= (1 << LED_L_PIN); // Set LED L pin as output
+}
+
+void control_LED(bool on) {
+    if (on) {
+        PORTB |= (1 << LED_L_PIN); // Turn on LED L
+    } else {
+        PORTB &= ~(1 << LED_L_PIN); // Turn off LED L
+    }
+}
+
+void init_brightness() {
+    // Set OC2A/PB3 as output for PWM
+    DDRB |= (1 << LED_D3_PIN);
+    
+    // Configure Timer/Counter2 for Fast PWM mode, non-inverted output
+    TCCR2A |= (1 << COM2A1) | (1 << WGM21) | (1 << WGM20);
+    TCCR2B |= (1 << CS21); // Prescaler = 8
+}
+
+void set_brightness(int brightness) {
+    OCR2A = brightness; // Set PWM duty cycle
+}
+
+int main(void) {
+    // Initialize USART for serial communication
+    USART_Init(103); // For 16MHz clock, baud rate 9600
+    
+    // Initialize HC-SR04 sensor
+    init_HCSR04();
+    
+    // Initialize LED L
+    init_LED();
+    
+    // Initialize brightness control for LED D3
+    init_brightness();
+
+    char buffer[32];
+    float distance;
+    int previous_brightness = -1;
+
+    while (1) {
+        // Measure distance
+        distance = measure_distance();
+
+        if (distance == -1) {
+            USART_Print("Distance measurement timeout\r\n");
+            _delay_ms(500); // Delay for stability
+            continue;
+        }
+
+        // Always print the real distance
+        char distance_buffer[16];
+        dtostrf(distance, 6, 2, distance_buffer); // Convert float to string with 2 decimal places
+        snprintf(buffer, sizeof(buffer), "Distance = %s cm\r\n", distance_buffer);
+        USART_Print(buffer);
+
+        // Control LED L based on distance
+        if (distance <= 15.0) {
+            control_LED(true); // Turn on LED L if distance is less than or equal to 15cm
+        } else if (distance >= 42.0) {
+            control_LED(true); // Turn on LED L if distance is greater than or equal to 42cm
+        } else {
+            control_LED(false); // Turn off LED L if distance is between 15cm and 42cm
+        }
+
+        // Control brightness of LED D3 based on distance
+        int brightness;
+        if (distance <= 15.0) {
+            brightness = 255; // Set brightness to 100% if distance is less than or equal to 15cm
+        } else if (distance >= 42.0) {
+            brightness = 0; // Set brightness to 0% if distance is greater than or equal to 42cm
+        } else {
+            // Linearly increase brightness (0 to 100% between 15cm and 42cm)
+            brightness = 255 - ((distance - 15) * 255) / (42 - 15);
+        }
+
+        // Set LED D3 brightness
+        set_brightness(brightness);
+
+        // Print brightness if it has changed
+        if (brightness != previous_brightness) {
+            snprintf(buffer, sizeof(buffer), "Brightness = %d%%\r\n", (100 - (brightness * 100) / 255));
+            USART_Print(buffer);
+            previous_brightness = brightness;
+        }
+
+        _delay_ms(500); // Delay for stability
+    }
+
+    return 0;
+}

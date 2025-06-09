@@ -1,0 +1,200 @@
+//  ENGR 290 FALL 2022
+//  AUTONOMOUS HOVERCRAFT CODE
+
+// Team #08:
+
+#include <Servo.h> 
+#include <MPU6050_light.h>
+
+#define liftFan  4
+#define pushFan 7                                                                                                                                       //P4
+#define backFan 6
+
+#define trigLeft 13
+#define echoLeft 3
+
+#define echoRight 2
+#define trigRight 11
+
+#define highPerfSensor 10
+
+MPU6050 mpu(Wire);
+unsigned long timer = 0;
+
+const int backServoPin = 9;
+const int pushServoPin = 5;
+Servo backServo;
+Servo pushServo;
+
+float pulse,frontDistance,durationL, distanceL, distanceR,durationR;
+float speed = 343; 
+float distanceBeforeF=0;
+short imu_zero_position=0;
+
+void setup() {
+  
+  pinMode(highPerfSensor, INPUT);
+
+  pinMode(liftFan,OUTPUT);
+  pinMode(pushFan,OUTPUT);
+  pinMode(backFan,OUTPUT);
+  
+  pinMode(trigLeft, OUTPUT);
+  pinMode(echoLeft, INPUT);
+  pinMode(trigRight, OUTPUT);
+  pinMode(echoRight, INPUT);
+
+  backServo.attach(backServoPin);
+  pushServo.attach(pushServoPin);
+
+//servo to neutral position
+
+  pushServo.write(90);
+  backServo.write(90);
+  
+  Serial.begin(9600); 
+  Wire.begin();
+  byte status = mpu.begin();
+
+   Serial.print(F("MPU6050 status: "));
+   Serial.println(status);
+   // stop everything if could not connect to MPU6050
+   while (status != 0) { } 
+   Serial.println(F("Calculating offsets, do not move MPU6050"));
+   //set acc/gyro
+   mpu.calcOffsets();
+   //zero position already zero, so no setup
+   Serial.println("Done!\n");
+   delay(1000);
+   //turn lift fan once IMU calibrated
+   analogWrite(liftFan,255);
+}
+
+void loop() {
+ 
+  //IMU update
+  mpu.update();
+  analogWrite(pushFan,155);
+
+ //read front distance
+  pulse = pulseIn(highPerfSensor, HIGH);
+  frontDistance =  (pulse/147) * 2.54;
+  Serial.print("F sensor: ");
+  Serial.print(frontDistance);
+  Serial.println("cm");
+  
+
+  if(frontDistance<15){
+  
+    analogWrite(pushFan,0);
+    //stop mechanism
+    if(distanceBeforeF>15){
+
+      analogWrite(backFan,255);
+      delay(2000);
+      analogWrite(backFan,0);
+    }
+
+//read right sensor
+     digitalWrite(trigRight, LOW);
+  delayMicroseconds(10);
+  digitalWrite(trigRight, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigRight, LOW);
+
+  durationR = pulseIn(echoRight, HIGH);
+  distanceR=((speed*durationR)/10000)/2;
+
+    Serial.print("\tSensor R: ");
+  Serial.print(distanceR);
+  Serial.print(" cm\t");
+ 
+  //left sensor
+
+
+  digitalWrite(trigLeft, LOW);
+  delayMicroseconds(10);
+  digitalWrite(trigLeft, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigLeft, LOW);
+ 
+  durationL = pulseIn(echoLeft, HIGH);
+ 
+  distanceL=((speed*durationL)/10000)/2;
+
+  Serial.print("Sensor L: ");
+  Serial.print(distanceL);
+  Serial.println(" cm");
+
+  if(distanceL>distanceR){
+    turnLeft();
+  }
+  else{
+    turnRight();
+  }
+  }
+
+
+ else{
+
+  distanceBeforeF=frontDistance;
+   //forward prop.
+ analogWrite(pushFan,155);
+
+  //control servos
+       if ((millis() - timer) > 10) { // print data every 10ms
+      Serial.print("Z : ");
+      Serial.println(mpu.getAngleZ());
+    }
+    if((mpu.getAngleZ()%90)!=0){
+ 
+      if(imu_zero_position==0){
+      pushServo.write(90+mpu.getAngleZ());
+      }
+      else {
+      pushServo.write(mpu.getAngleZ()/imu_zero_position);
+      }
+    }
+    else{
+       pushServo.write(90);
+    }
+ }
+}
+
+void turnLeft(){
+
+  backServo.write(180);
+  pushServo.write(180);
+
+  while(mpu.getAngleZ()%90!=0){
+  analogWrite(pushFan,120);
+  analogWrite(backFan,120);
+  }
+  pushServo.write(90);
+  backServo.write(90); 
+  analogWrite(pushFan,0);
+  analogWrite(backFan,0);
+  //calibrate IMU
+  imu_zero_position--;
+
+}
+
+void turnRight(){  
+
+  backServo.write(0);
+  pushServo.write(0);
+
+  while(mpu.getAngleZ()%90!=0){
+  analogWrite(pushFan,120);
+  analogWrite(backFan,120);
+  }
+
+  pushServo.write(90);
+  backServo.write(90);
+  analogWrite(pushFan,0);
+  analogWrite(backFan,0);
+
+  //calibrate IMU
+    imu_zero_position++;
+ 
+}
